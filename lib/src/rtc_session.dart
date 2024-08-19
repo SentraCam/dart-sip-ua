@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:sdp_transform/sdp_transform.dart' as sdp_transform;
+import 'package:sdp_transform/sdp_transform.dart';
 
 import 'package:sip_ua/sip_ua.dart';
 import 'constants.dart' as DartSIP_C;
@@ -631,9 +634,10 @@ class RTCSession extends EventManager implements Owner {
     }
 
     logger.d('emit "sdp"');
-    emit(EventSdp(originator: 'remote', type: 'offer', sdp: request.body));
+    final String? processedSDP = _sdpOfferToWebRTC(request.body);
+    emit(EventSdp(originator: 'remote', type: 'offer', sdp: processedSDP));
 
-    RTCSessionDescription offer = RTCSessionDescription(request.body, 'offer');
+    RTCSessionDescription offer = RTCSessionDescription(processedSDP, 'offer');
     try {
       await _connection!.setRemoteDescription(offer);
     } catch (error) {
@@ -859,6 +863,7 @@ class RTCSession extends EventManager implements Owner {
     int duration = options['duration'] ?? RTCSession_DTMF.C.DEFAULT_DURATION;
     int interToneGap =
         options['interToneGap'] ?? RTCSession_DTMF.C.DEFAULT_INTER_TONE_GAP;
+    int sendInterval = options['sendInterval'] ?? duration + interToneGap;
 
     if (tones == null) {
       throw Exceptions.TypeError('Not enough arguments');
@@ -942,7 +947,7 @@ class RTCSession extends EventManager implements Owner {
 
           dtmf.send(tone, options);
           await Future<void>.delayed(
-              Duration(milliseconds: duration + interToneGap), () {});
+              Duration(milliseconds: sendInterval), () {});
         });
       }
     }
@@ -1951,34 +1956,36 @@ class RTCSession extends EventManager implements Owner {
   }
 
   Future<RTCSessionDescription> _processInDialogSdpOffer(
-      dynamic request) async {
+      IncomingRequest request) async {
     logger.d('_processInDialogSdpOffer()');
 
-    Map<String, dynamic> sdp = request.parseSDP();
+    Map<String, dynamic>? sdp = request.parseSDP();
 
     bool hold = false;
+    if (sdp != null) {
+      for (Map<String, dynamic> m in sdp['media']) {
+        if (holdMediaTypes.indexOf(m['type']) == -1) {
+          continue;
+        }
 
-    for (Map<String, dynamic> m in sdp['media']) {
-      if (holdMediaTypes.indexOf(m['type']) == -1) {
-        continue;
-      }
+        String direction = m['direction'] ?? sdp['direction'] ?? 'sendrecv';
 
-      String direction = m['direction'] ?? sdp['direction'] ?? 'sendrecv';
-
-      if (direction == 'sendonly' || direction == 'inactive') {
-        hold = true;
-      }
-      // If at least one of the streams is active don't emit 'hold'.
-      else {
-        hold = false;
-        break;
+        if (direction == 'sendonly' || direction == 'inactive') {
+          hold = true;
+        }
+        // If at least one of the streams is active don't emit 'hold'.
+        else {
+          hold = false;
+          break;
+        }
       }
     }
 
     logger.d('emit "sdp"');
-    emit(EventSdp(originator: 'remote', type: 'offer', sdp: request.body));
+    final String? processedSDP = _sdpOfferToWebRTC(request.body);
+    emit(EventSdp(originator: 'remote', type: 'offer', sdp: processedSDP));
 
-    RTCSessionDescription offer = RTCSessionDescription(request.body, 'offer');
+    RTCSessionDescription offer = RTCSessionDescription(processedSDP, 'offer');
 
     if (_status == C.STATUS_TERMINATED) {
       throw Exceptions.InvalidStateError('terminated');
@@ -2780,6 +2787,28 @@ class RTCSession extends EventManager implements Owner {
         }
       }
     }
+
+    return sdp_transform.write(sdp, null);
+  }
+
+  /// SDP offers may contain text media channels. e.g. Older clients using linphone.
+  /// 
+  /// WebRTC does not support text media channels, so remove them.
+  String? _sdpOfferToWebRTC(String? sdpInput) {
+    if (sdpInput == null) {
+      return sdpInput;
+    }
+
+    Map<String, dynamic> sdp = sdp_transform.parse(sdpInput);
+
+    final List<Map<String, dynamic>> mediaList = <Map<String, dynamic>>[];
+
+    for (dynamic element in sdp['media']) {
+      if (element['type'] != 'text') {
+        mediaList.add(element);
+      }
+    }
+    sdp['media'] = mediaList;
 
     return sdp_transform.write(sdp, null);
   }
